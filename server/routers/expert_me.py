@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 
 from .. import models
@@ -70,7 +70,7 @@ def upsert_expert(body: ExpertProfileIn, user: models.User = Depends(get_current
 
 
 @router.put("/services")
-def replace_services(services: list[ServiceIn], user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+def replace_services(services: list[ServiceIn] = Body(...), user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     e = db.query(models.ExpertProfile).filter_by(user_id=user.id).first()
     if not e:
         raise HTTPException(400, "كمّلي ملف الخبيرة أول")
@@ -85,7 +85,7 @@ def replace_services(services: list[ServiceIn], user: models.User = Depends(get_
 
 
 @router.put("/hours")
-def update_hours(hours: dict, user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+def update_hours(hours: dict = Body(...), user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     e = db.query(models.ExpertProfile).filter_by(user_id=user.id).first()
     if not e:
         raise HTTPException(400, "كمّلي ملف الخبيرة أول")

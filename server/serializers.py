@@ -122,6 +122,7 @@ def booking_out(b: models.Booking) -> dict:
         "total": b.total,
         "deposit": b.deposit,
         "remaining": b.remaining,
+        "bnplSurcharge": float(getattr(b, "bnpl_surcharge", 0) or 0),
         "paymentMethod": b.payment_method,
         "status": b.status,
         "createdAt": b.created_at.isoformat() if b.created_at else "",

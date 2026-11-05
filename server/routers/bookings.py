@@ -5,7 +5,7 @@ from .. import models
 from ..auth import get_current_user
 from ..config import get_settings
 from ..db import get_db
-from ..money import deposit_for, make_booking_id, make_start_code
+from ..money import BNPL_SURCHARGE_RATE, bnpl_surcharge_for, deposit_for, is_bnpl, make_booking_id, make_start_code
 from ..payments import get_payment_provider
 from ..schemas import BookingIn, RateIn, RejectIn, StartCodeIn
 from ..serializers import booking_out, notify
@@ -28,6 +28,7 @@ def _quote(expert: models.ExpertProfile, service_ids: list[str], mode: str):
         "total": total,
         "deposit": deposit,
         "remaining": total - deposit,
+        "bnplSurchargeRate": BNPL_SURCHARGE_RATE,
         "services": services,
     }
 
@@ -48,9 +49,11 @@ def create_booking(body: BookingIn, db: Session = Depends(get_db), user: models.
     if not e:
         raise HTTPException(404, "الخبيرة غير موجودة")
     q = _quote(e, body.service_ids, body.mode)
-    bnpl = body.payment_method in ("tabby", "tamara")
-    deposit = q["total"] if bnpl else q["deposit"]
-    remaining = 0 if bnpl else q["remaining"]
+    bnpl = is_bnpl(body.payment_method)
+    # Backend computes surcharge — never trust a client-supplied fee.
+    surcharge = bnpl_surcharge_for(q["total"], body.payment_method)
+    deposit = (q["total"] + surcharge) if bnpl else float(q["deposit"])
+    remaining = 0.0 if bnpl else float(q["remaining"])
     commission = round(q["subtotal"] * get_settings().commission_rate)
     address = None
     if body.address_id:
@@ -84,6 +87,7 @@ def create_booking(body: BookingIn, db: Session = Depends(get_db), user: models.
         total=q["total"],
         deposit=deposit,
         remaining=remaining,
+        bnpl_surcharge=surcharge,
         payment_method=body.payment_method,
         status="pending_accept",
         platform_commission=commission,
@@ -100,6 +104,12 @@ def create_booking(body: BookingIn, db: Session = Depends(get_db), user: models.
         kind="escrow_hold", amount=deposit, provider=pay.provider, provider_ref=pay.ref,
         note="عربون محجوز — بانتظار قبول الخبيرة",
     ))
+    if surcharge:
+        db.add(models.PaymentLedger(
+            booking_id=bid, expert_id=e.id, customer_id=user.id,
+            kind="bnpl_surcharge", amount=surcharge, provider=pay.provider, provider_ref=pay.ref,
+            note="رسوم خدمة التقسيط 2.5٪ للمنصة (لا تخصم من حصة الخبيرة)",
+        ))
     notify(db, e.user_id, "طلب حجز جديد", f"{user.name} طلبت {b.service_name}", booking_id=bid)
     notify(db, user.id, "طلبك انرسل", f"بانتظار قبول {e.display_name}", booking_id=bid)
     e.bookings_count = (e.bookings_count or 0) + 1

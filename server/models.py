@@ -104,9 +104,10 @@ class Booking(Base):
     address_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     subtotal: Mapped[int] = mapped_column(Integer)
     travel_fee: Mapped[int] = mapped_column(Integer, default=0)
-    total: Mapped[int] = mapped_column(Integer)
-    deposit: Mapped[int] = mapped_column(Integer)
-    remaining: Mapped[int] = mapped_column(Integer)
+    total: Mapped[int] = mapped_column(Integer)  # services + travel (expert base; no BNPL surcharge)
+    deposit: Mapped[float] = mapped_column(Float)  # amount charged now (incl. BNPL surcharge when applicable)
+    remaining: Mapped[float] = mapped_column(Float)
+    bnpl_surcharge: Mapped[float] = mapped_column(Float, default=0)  # platform-only; offsets Tabby/Tamara fee
     payment_method: Mapped[str] = mapped_column(String(30), default="mada")
     status: Mapped[str] = mapped_column(String(30), default="pending_accept", index=True)
     platform_commission: Mapped[int] = mapped_column(Integer, default=0)
@@ -133,7 +134,7 @@ class PaymentLedger(Base):
     expert_id: Mapped[str] = mapped_column(String(32), index=True)
     customer_id: Mapped[str] = mapped_column(String(32), index=True)
     kind: Mapped[str] = mapped_column(String(40))  # escrow_hold|escrow_release|commission|refund|payout
-    amount: Mapped[int] = mapped_column(Integer)
+    amount: Mapped[float] = mapped_column(Float)
     currency: Mapped[str] = mapped_column(String(8), default="SAR")
     provider: Mapped[str] = mapped_column(String(30), default="mock")
     provider_ref: Mapped[str | None] = mapped_column(String(80), nullable=True)

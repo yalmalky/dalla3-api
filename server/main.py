@@ -22,6 +22,18 @@ async def lifespan(_: FastAPI):
             )
     except Exception:
         pass
+    # BNPL surcharge column + float deposit/remaining for 2-decimal fees
+    for sql in (
+        "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS bnpl_surcharge DOUBLE PRECISION DEFAULT 0",
+        "ALTER TABLE bookings ALTER COLUMN deposit TYPE DOUBLE PRECISION USING deposit::double precision",
+        "ALTER TABLE bookings ALTER COLUMN remaining TYPE DOUBLE PRECISION USING remaining::double precision",
+        "ALTER TABLE payment_ledger ALTER COLUMN amount TYPE DOUBLE PRECISION USING amount::double precision",
+    ):
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(sql)
+        except Exception:
+            pass
     db = SessionLocal()
     try:
         ensure_promos(db)

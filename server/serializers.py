@@ -49,6 +49,8 @@ def cover_for(e: models.ExpertProfile) -> str:
     for item in port:
         if _usable_cover(item):
             return str(item).strip()
+    # No stock photo presented as the expert's own: the app shows its neutral brand cover instead.
+    return ""
     cats = e.categories or ["makeup"]
     cat = cats[0] if cats else "makeup"
     name = STOCK_COVER.get(cat, "makeup1")

@@ -11,13 +11,8 @@ router = APIRouter(prefix="/me", tags=["me"])
 
 @router.get("/profile")
 def profile(user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # No placeholder address: the customer adds her real address (with GPS pin) before the first home booking.
     addrs = db.query(models.Address).filter_by(user_id=user.id).all()
-    if not addrs:
-        a = models.Address(user_id=user.id, label="البيت", details=f"{user.city} — حي النرجس")
-        db.add(a)
-        db.commit()
-        db.refresh(a)
-        addrs = [a]
     return {
         "id": user.id,
         "name": user.name,
@@ -43,7 +38,8 @@ def add_address(body: AddressIn, user: models.User = Depends(get_current_user), 
 
 @router.get("/favorites")
 def favorites(user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return [f.expert_id for f in db.query(models.Favorite).filter_by(user_id=user.id).all()]
+    hidden = {e.id for e in db.query(models.ExpertProfile.id).filter(models.ExpertProfile.is_test.is_(True))}
+    return [f.expert_id for f in db.query(models.Favorite).filter_by(user_id=user.id).all() if f.expert_id not in hidden]
 
 
 @router.post("/favorites/{expert_id}")

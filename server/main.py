@@ -6,7 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
 from .db import Base, engine
-from .routers import auth_routes, bookings, catalog, expert_me, me
+from .routers import admin, auth_routes, bookings, catalog, expert_me, me
+from .test_accounts import classify_existing
 from .seed import ensure_promos
 from .db import SessionLocal
 
@@ -34,9 +35,17 @@ async def lifespan(_: FastAPI):
                 conn.exec_driver_sql(sql)
         except Exception:
             pass
+    # Reversible test-account flag (portable: works on Postgres and SQLite)
+    from sqlalchemy import inspect as _inspect
+    for table in ("users", "expert_profiles"):
+        cols = {c["name"] for c in _inspect(engine).get_columns(table)}
+        if "is_test" not in cols:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN is_test BOOLEAN")
     db = SessionLocal()
     try:
         ensure_promos(db)
+        print("test-account classification:", classify_existing(db), flush=True)
     finally:
         db.close()
     yield
@@ -57,6 +66,7 @@ app.include_router(catalog.router, prefix="/api")
 app.include_router(bookings.router, prefix="/api")
 app.include_router(expert_me.router, prefix="/api")
 app.include_router(me.router, prefix="/api")
+app.include_router(admin.router, prefix="/api")
 
 
 @app.get("/health")

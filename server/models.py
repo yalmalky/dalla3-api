@@ -26,6 +26,8 @@ class User(Base):
     phone: Mapped[str] = mapped_column(String(40), default="")
     role: Mapped[str] = mapped_column(String(20), default="customer")  # customer | expert
     city: Mapped[str] = mapped_column(String(80), default="الرياض")
+    # Hidden test/QA/demo account (reversible; see server/test_accounts.py). NULL = not yet classified.
+    is_test: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     expert_profile = relationship("ExpertProfile", back_populates="user", uselist=False)
@@ -73,6 +75,7 @@ class ExpertProfile(Base):
     rating: Mapped[float] = mapped_column(Float, default=5.0)
     reviews_count: Mapped[int] = mapped_column(Integer, default=0)
     bookings_count: Mapped[int] = mapped_column(Integer, default=0)
+    is_test: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     user = relationship("User", back_populates="expert_profile")

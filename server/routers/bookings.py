@@ -9,6 +9,7 @@ from ..money import BNPL_SURCHARGE_RATE, bnpl_surcharge_for, deposit_for, is_bnp
 from ..payments import get_payment_provider
 from ..schemas import BookingIn, RateIn, RejectIn, StartCodeIn
 from ..serializers import booking_out, notify
+from ..test_accounts import is_hidden
 
 router = APIRouter(prefix="/bookings", tags=["bookings"])
 
@@ -36,7 +37,7 @@ def _quote(expert: models.ExpertProfile, service_ids: list[str], mode: str):
 @router.post("/quote")
 def quote(body: BookingIn, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
     e = db.query(models.ExpertProfile).options(joinedload(models.ExpertProfile.services)).filter_by(id=body.expert_id).first()
-    if not e:
+    if not e or is_hidden(e):
         raise HTTPException(404, "الخبيرة غير موجودة")
     q = _quote(e, body.service_ids, body.mode)
     q.pop("services", None)
@@ -46,7 +47,7 @@ def quote(body: BookingIn, db: Session = Depends(get_db), user: models.User = De
 @router.post("")
 def create_booking(body: BookingIn, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
     e = db.query(models.ExpertProfile).options(joinedload(models.ExpertProfile.services)).filter_by(id=body.expert_id).first()
-    if not e:
+    if not e or (is_hidden(e) and not user.is_test):
         raise HTTPException(404, "الخبيرة غير موجودة")
     q = _quote(e, body.service_ids, body.mode)
     bnpl = is_bnpl(body.payment_method)

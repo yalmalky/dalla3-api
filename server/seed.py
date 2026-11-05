@@ -17,7 +17,6 @@ def ensure_promos(db: Session):
     if db.query(models.Promo).count():
         return
     db.add_all([
-        models.Promo(id="pr_welcome", title="أول حجز عليك علينا", subtitle="خصم ٢٠٪ لكود WELCOME", cta="استخدمي العرض", code="WELCOME", badge="20%", theme="lavender", sponsored=False),
         models.Promo(id="pr_home", title="زيارة منزلية", subtitle="توصيل الخبيرة لباب بيتك", cta="شوفي القريبات", badge="بيت", theme="pink", sponsored=False),
     ])
     db.commit()

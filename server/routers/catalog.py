@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 
 from .. import models
@@ -6,6 +6,10 @@ from ..auth import get_optional_user
 from ..db import get_db
 from ..seed import ensure_promos
 from ..serializers import CATEGORIES, expert_out, service_out
+from ..test_accounts import is_hidden, visible_expert
+
+# Demo promos with no backing logic (e.g. WELCOME code is not applied at checkout) stay hidden.
+HIDDEN_PROMOS = {"pr_welcome"}
 
 router = APIRouter(tags=["catalog"])
 
@@ -18,7 +22,8 @@ def categories():
 @router.get("/promos")
 def promos(db: Session = Depends(get_db)):
     ensure_promos(db)
-    rows = db.query(models.Promo).all()
+    hidden_experts = {e.id for e in db.query(models.ExpertProfile.id).filter(models.ExpertProfile.is_test.is_(True))}
+    rows = [p for p in db.query(models.Promo).all() if p.id not in HIDDEN_PROMOS and p.expert_id not in hidden_experts]
     return [
         {
             "id": p.id,
@@ -46,6 +51,7 @@ def list_experts(
         db.query(models.ExpertProfile)
         .options(joinedload(models.ExpertProfile.services))
         .filter(models.ExpertProfile.status == "approved")
+        .filter(visible_expert())
         .all()
     )
     out = []
@@ -64,8 +70,8 @@ def list_experts(
 @router.get("/experts/{expert_id}")
 def get_expert(expert_id: str, db: Session = Depends(get_db)):
     e = db.query(models.ExpertProfile).options(joinedload(models.ExpertProfile.services)).filter_by(id=expert_id).first()
-    if not e:
-        return None
+    if not e or is_hidden(e):
+        raise HTTPException(404, "الخبيرة غير موجودة")
     return expert_out(e)
 
 

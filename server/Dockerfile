@@ -1,0 +1,8 @@
+FROM python:3.12-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends libpq5 && rm -rf /var/lib/apt/lists/*
+COPY server/requirements.txt /app/server/requirements.txt
+RUN pip install --no-cache-dir -r /app/server/requirements.txt
+COPY server /app/server
+ENV PYTHONUNBUFFERED=1
+CMD ["uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "10000"]

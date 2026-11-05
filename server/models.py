@@ -64,7 +64,7 @@ class ExpertProfile(Base):
     sponsored: Mapped[bool] = mapped_column(Boolean, default=False)
     portfolio: Mapped[list] = mapped_column(JSON, default=list)
     hours: Mapped[dict] = mapped_column(JSON, default=dict)
-    cover: Mapped[str] = mapped_column(String(500), default="")
+    cover: Mapped[str] = mapped_column(Text, default="")
     tint: Mapped[str] = mapped_column(String(40), default="lavender")
     iban: Mapped[str] = mapped_column(String(40), default="")
     bank_name: Mapped[str] = mapped_column(String(80), default="")

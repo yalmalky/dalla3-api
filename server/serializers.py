@@ -3,12 +3,12 @@ from math import cos, radians, sqrt
 from . import models
 
 CATEGORIES = [
-    {"id": "makeup", "name": "مكياج", "icon": "Sparkles", "tint": "lavender"},
-    {"id": "hair", "name": "شعر", "icon": "Scissors", "tint": "pink"},
-    {"id": "nails", "name": "أظافر", "icon": "Hand", "tint": "mint"},
-    {"id": "skin", "name": "بشرة", "icon": "Droplets", "tint": "lavender"},
-    {"id": "henna", "name": "حناء", "icon": "Flower2", "tint": "pink"},
-    {"id": "massage", "name": "مساج", "icon": "Heart", "tint": "mint"},
+    {"id": "makeup", "name": "مكياج", "icon": "brush", "tint": "--pink-50"},
+    {"id": "hair", "name": "شعر", "icon": "scissors", "tint": "--lav-50"},
+    {"id": "nails", "name": "أظافر", "icon": "gem", "tint": "--peach-50"},
+    {"id": "skin", "name": "بشرة", "icon": "droplet", "tint": "--lav-50"},
+    {"id": "henna", "name": "حناء", "icon": "leaf", "tint": "--sage-50"},
+    {"id": "massage", "name": "مساج", "icon": "flower", "tint": "--mint-50"},
 ]
 
 
@@ -17,6 +17,53 @@ def rough_km(a_lat, a_lng, b_lat, b_lng) -> float:
     dy = (a_lat - b_lat) * 111
     dx = (a_lng - b_lng) * 111 * cos(radians((a_lat + b_lat) / 2))
     return round(sqrt(dx * dx + dy * dy), 1)
+
+
+
+STOCK_COVER = {
+    "makeup": "makeup1",
+    "hair": "hair1",
+    "nails": "nails1",
+    "skin": "skin1",
+    "henna": "henna1",
+    "massage": "massage1",
+}
+STOCK_HOST = "https://dalla3.onrender.com"
+
+
+def _usable_cover(src: str | None) -> bool:
+    if not src:
+        return False
+    s = src.strip()
+    if not s:
+        return False
+    if s.startswith("data:") and len(s) < 200:
+        return False
+    return True
+
+
+def cover_for(e: models.ExpertProfile) -> str:
+    if _usable_cover(e.cover):
+        return e.cover.strip()
+    port = e.portfolio or []
+    for item in port:
+        if _usable_cover(item):
+            return str(item).strip()
+    cats = e.categories or ["makeup"]
+    cat = cats[0] if cats else "makeup"
+    name = STOCK_COVER.get(cat, "makeup1")
+    # stable variety
+    h = sum(ord(c) for c in (e.id or "")) % 3
+    alts = {
+        "makeup": ["makeup1", "makeup2", "skin1"],
+        "hair": ["hair1", "hair2", "hair1"],
+        "nails": ["nails1", "henna1", "nails1"],
+        "skin": ["skin1", "massage1", "skin1"],
+        "henna": ["henna1", "nails1", "henna1"],
+        "massage": ["massage1", "skin1", "massage1"],
+    }
+    name = alts.get(cat, ["makeup1"])[h]
+    return f"{STOCK_HOST}/img/{name}.webp"
 
 
 def expert_out(e: models.ExpertProfile, origin=(24.7136, 46.6753)) -> dict:
@@ -40,7 +87,7 @@ def expert_out(e: models.ExpertProfile, origin=(24.7136, 46.6753)) -> dict:
         "nafathVerified": e.nafath_verified,
         "sponsored": e.sponsored,
         "nextAvailable": "اليوم",
-        "cover": e.cover or "",
+        "cover": cover_for(e),
         "portfolio": e.portfolio or [],
         "bio": e.bio or "",
         "tint": e.tint or "lavender",

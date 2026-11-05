@@ -14,6 +14,14 @@ from .db import SessionLocal
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
+    # Widen cover so photo data-URLs are not truncated at 500 chars
+    try:
+        with engine.begin() as conn:
+            conn.exec_driver_sql(
+                "ALTER TABLE expert_profiles ALTER COLUMN cover TYPE TEXT"
+            )
+    except Exception:
+        pass
     db = SessionLocal()
     try:
         ensure_promos(db)

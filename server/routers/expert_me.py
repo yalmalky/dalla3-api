@@ -26,7 +26,7 @@ def upsert_expert(body: ExpertProfileIn, user: models.User = Depends(get_current
         user.role = "expert"
     e = db.query(models.ExpertProfile).filter_by(user_id=user.id).first()
     if not e:
-        e = models.ExpertProfile(user_id=user.id, display_name=body.display_name)
+        e = models.ExpertProfile(user_id=user.id, display_name=body.display_name, is_test=bool(user.is_test))
         db.add(e)
         db.flush()
     e.display_name = body.display_name

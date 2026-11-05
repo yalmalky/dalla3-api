@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from .. import models
 from ..auth import create_token, get_current_user, hash_password, verify_password
 from ..db import get_db
+from ..test_accounts import is_test_email
 from ..schemas import LoginIn, RegisterIn, TokenOut
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -34,6 +35,7 @@ def register(body: RegisterIn, db: Session = Depends(get_db)):
         phone=body.phone,
         role=body.role,
         city=body.city,
+        is_test=is_test_email(body.email),  # QA sign-ups (e.g. @dalla3.test) stay hidden
     )
     db.add(user)
     db.commit()

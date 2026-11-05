@@ -37,7 +37,7 @@ def _quote(expert: models.ExpertProfile, service_ids: list[str], mode: str):
 @router.post("/quote")
 def quote(body: BookingIn, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
     e = db.query(models.ExpertProfile).options(joinedload(models.ExpertProfile.services)).filter_by(id=body.expert_id).first()
-    if not e or is_hidden(e):
+    if not e or (is_hidden(e) and not user.is_test):
         raise HTTPException(404, "الخبيرة غير موجودة")
     q = _quote(e, body.service_ids, body.mode)
     q.pop("services", None)

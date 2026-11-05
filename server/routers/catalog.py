@@ -6,7 +6,7 @@ from ..auth import get_optional_user
 from ..db import get_db
 from ..seed import ensure_promos
 from ..serializers import CATEGORIES, expert_out, service_out
-from ..test_accounts import is_hidden, visible_expert
+from ..test_accounts import is_hidden
 
 # Demo promos with no backing logic (e.g. WELCOME code is not applied at checkout) stay hidden.
 HIDDEN_PROMOS = {"pr_welcome"}
@@ -51,9 +51,11 @@ def list_experts(
         db.query(models.ExpertProfile)
         .options(joinedload(models.ExpertProfile.services))
         .filter(models.ExpertProfile.status == "approved")
-        .filter(visible_expert())
         .all()
     )
+    # Test accounts (QA) also see hidden test experts; real users never do.
+    if not (user and user.is_test):
+        rows = [e for e in rows if not e.is_test]
     out = []
     for e in rows:
         if category and category != "all" and category not in (e.categories or []):
@@ -68,9 +70,9 @@ def list_experts(
 
 
 @router.get("/experts/{expert_id}")
-def get_expert(expert_id: str, db: Session = Depends(get_db)):
+def get_expert(expert_id: str, db: Session = Depends(get_db), user: models.User | None = Depends(get_optional_user)):
     e = db.query(models.ExpertProfile).options(joinedload(models.ExpertProfile.services)).filter_by(id=expert_id).first()
-    if not e or is_hidden(e):
+    if not e or (is_hidden(e) and not (user and user.is_test)):
         raise HTTPException(404, "الخبيرة غير موجودة")
     return expert_out(e)
 

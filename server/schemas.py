@@ -79,3 +79,8 @@ class StartCodeIn(BaseModel):
 class RateIn(BaseModel):
     rating: int = Field(ge=1, le=5)
     text: str = ""
+
+
+class SocialIn(BaseModel):
+    id_token: str
+    name: str = ""  # Apple sends the name only on the first authorization (from the native sheet)

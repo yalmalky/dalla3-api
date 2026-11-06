@@ -177,6 +177,40 @@ def reject(booking_id: str, body: RejectIn, user: models.User = Depends(get_curr
     return booking_out(b)
 
 
+@router.post("/{booking_id}/cancel")
+def cancel_by_customer(booking_id: str, user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Customer cancellation, only where the published rule already applies: free with a full refund while the
+    expert hasn't accepted yet, or more than 24 h before the appointment (Riyadh time). Late cancellations
+    (12-24 h / <12 h / no-show fees) wait for the owner's approval of the cancellation policy -> support."""
+    from datetime import datetime, timedelta, timezone as _tz
+    b = db.get(models.Booking, booking_id)
+    if not b or b.customer_id != user.id:
+        raise HTTPException(403, "مو حجزك")
+    if b.status not in ("pending_accept", "confirmed"):
+        raise HTTPException(400, "ما يمكن إلغاء هالحجز")
+    riyadh = _tz(timedelta(hours=3))
+    try:
+        appt = datetime.strptime(f"{b.date} {b.time}", "%Y-%m-%d %H:%M").replace(tzinfo=riyadh)
+    except ValueError:
+        appt = None
+    if b.status == "confirmed" and (appt is None or appt - datetime.now(riyadh) < timedelta(hours=24)):
+        raise HTTPException(400, "الإلغاء المجاني متاح قبل الموعد بـ24 ساعة — تواصلي مع الدعم للإلغاء المتأخر")
+    b.status = "cancelled"
+    provider = get_payment_provider(b.payment_provider)
+    ref = provider.refund(amount=b.deposit, booking_id=b.id, reason="customer_cancel")
+    db.add(models.PaymentLedger(
+        booking_id=b.id, expert_id=b.expert_id, customer_id=b.customer_id,
+        kind="refund", amount=b.deposit, provider=ref.provider, provider_ref=ref.ref,
+        note="استرجاع كامل: إلغاء العميلة (مجاني)",
+    ))
+    ex = db.get(models.ExpertProfile, b.expert_id)
+    if ex:
+        notify(db, ex.user_id, "تم إلغاء الحجز", f"العميلة ألغت حجز {b.date} {b.time}", booking_id=b.id)
+    db.commit()
+    db.refresh(b)
+    return booking_out(b)
+
+
 @router.post("/{booking_id}/start")
 def start(booking_id: str, body: StartCodeIn, user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     b = db.get(models.Booking, booking_id)

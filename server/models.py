@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy import JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -28,6 +28,9 @@ class User(Base):
     city: Mapped[str] = mapped_column(String(80), default="الرياض")
     # Hidden test/QA/demo account (reversible; see server/test_accounts.py). NULL = not yet classified.
     is_test: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False, index=True)
+    # Social sign-in subjects (Sign in with Apple / Google). Accounts are linked by verified email.
+    apple_sub: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    google_sub: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     expert_profile = relationship("ExpertProfile", back_populates="user", uselist=False)
@@ -191,3 +194,16 @@ class Promo(Base):
     expert_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class MediaBlob(Base):
+    """Uploaded photos/documents (expert portfolio, profile photo, health certificate).
+    Stored in Postgres (bytea) because Render's free-tier disk is ephemeral; images are
+    resized/compressed client-side (<= ~1600px JPEG) so rows stay small."""
+    __tablename__ = "media_blobs"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: _id("m_"))
+    owner_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id"), index=True)
+    content_type: Mapped[str] = mapped_column(String(80))
+    size: Mapped[int] = mapped_column(Integer, default=0)
+    data: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

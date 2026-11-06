@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     cors_origins: str = "*"
     commission_rate: float = 0.15
     payment_provider: str = "mock"  # mock | moyasar later
+    # Sign in with Apple: accepted `aud` values (iOS bundle id; add a Services ID later for web)
+    apple_client_ids: str = "com.yalmalky.dalla3"
+    # Google Sign-In: comma-separated OAuth client IDs (iOS + web). Empty = Google login disabled.
+    google_client_ids: str = ""
 
 
 @lru_cache

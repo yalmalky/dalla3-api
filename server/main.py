@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
 from .db import Base, engine
-from .routers import admin, auth_routes, bookings, catalog, expert_me, me
+from .routers import admin, auth_routes, bookings, catalog, expert_me, me, media
 from .test_accounts import classify_existing
 from .seed import ensure_promos
 from .db import SessionLocal
@@ -42,6 +42,11 @@ async def lifespan(_: FastAPI):
         if "is_test" not in cols:
             with engine.begin() as conn:
                 conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN is_test BOOLEAN")
+    ucols = {c["name"] for c in _inspect(engine).get_columns("users")}
+    for col in ("apple_sub", "google_sub"):
+        if col not in ucols:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(f"ALTER TABLE users ADD COLUMN {col} VARCHAR(255)")
     db = SessionLocal()
     try:
         ensure_promos(db)
@@ -67,6 +72,7 @@ app.include_router(bookings.router, prefix="/api")
 app.include_router(expert_me.router, prefix="/api")
 app.include_router(me.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
+app.include_router(media.router, prefix="/api")
 
 
 @app.get("/health")

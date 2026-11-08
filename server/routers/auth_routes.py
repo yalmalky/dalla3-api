@@ -5,7 +5,7 @@ from .. import models
 from ..auth import create_token, get_current_user, hash_password, verify_password
 from ..db import get_db
 from ..test_accounts import is_test_email
-from ..reviewer_lane import is_designated_email, sync_reviewer_designation
+from ..reviewer_lane import is_designated_user_id, sync_reviewer_designation
 import secrets
 
 from ..config import get_settings
@@ -24,8 +24,8 @@ def _user_dict(u: models.User) -> dict:
         "role": u.role,
         "city": u.city,
         "expertId": u.expert_profile.id if u.expert_profile else None,
-        # Server allowlist only. Clients must not infer this from the email domain.
-        "reviewerLane": is_designated_email(u.email),
+        # True only when this existing user id is in APPLE_REVIEWER_USER_IDS.
+        "reviewerLane": is_designated_user_id(u.id),
     }
 
 
@@ -43,7 +43,7 @@ def register(body: RegisterIn, db: Session = Depends(get_db)):
         role=body.role,
         city=body.city,
         is_test=is_test_email(body.email),  # QA sign-ups (e.g. @dalla3.test) stay hidden
-        is_apple_reviewer=False,  # domain and client input cannot self-grant; sync applies the allowlist
+        is_apple_reviewer=False,  # a new id is not designated; email and client input cannot self-grant
     )
     db.add(user)
     db.commit()

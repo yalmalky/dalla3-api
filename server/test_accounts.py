@@ -5,7 +5,7 @@
 - Hidden customers keep their data; they are flagged so they can be excluded from stats/exports.
 - `classify_existing` runs ONCE per row (only where is_test IS NULL).
 - Public sign-up sets is_test from the email heuristic (see auth routes). That flag is not reviewer designation.
-  Reviewer access is only the exact-email allowlist in APPLE_REVIEWER_EMAILS.
+  Reviewer access is only APPLE_REVIEWER_USER_IDS: exact ids of accounts that already exist.
 - After classification, hide/unhide is via `/api/admin/test-accounts` (header X-Admin-Token = env ADMIN_TOKEN) or SQL:
       UPDATE expert_profiles SET is_test = false WHERE id = 'e_…';
       UPDATE users SET is_test = false WHERE email = '…';

@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session, joinedload
 from .. import models
 from ..auth import get_current_user
 from ..db import get_db
-from ..reviewer_lane import can_discover_expert, is_designated_email
+from ..reviewer_lane import can_discover_expert, is_designated_user_id
 from ..schemas import AddressIn
 
 router = APIRouter(prefix="/me", tags=["me"])
@@ -21,7 +21,7 @@ def profile(user: models.User = Depends(get_current_user), db: Session = Depends
         "city": user.city,
         "role": user.role,
         "email": user.email,
-        "reviewerLane": is_designated_email(user.email),
+        "reviewerLane": is_designated_user_id(user.id),
         "addresses": [
             {"id": a.id, "label": a.label, "details": a.details, "location": {"lat": a.lat, "lng": a.lng}}
             for a in addrs

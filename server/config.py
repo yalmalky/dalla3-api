@@ -15,8 +15,9 @@ class Settings(BaseSettings):
     apple_client_ids: str = "com.yalmalky.dalla3"
     # Google Sign-In: comma-separated OAuth client IDs (iOS + web). Empty = Google login disabled.
     google_client_ids: str = ""
-    # Exact Apple reviewer mailboxes, comma-separated. Empty = nobody. Domains are ignored.
-    apple_reviewer_emails: str = ""
+    # Existing user ids (u_ + 10 hex chars), comma-separated. Empty = nobody.
+    # Mailboxes, domains, and wildcards are not designation. APPLE_REVIEWER_EMAILS is ignored.
+    apple_reviewer_user_ids: str = ""
 
 
 @lru_cache

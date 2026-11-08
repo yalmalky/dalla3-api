@@ -1,7 +1,9 @@
 """Server-controlled Apple reviewer lane.
 
-Designation is an exact-email allowlist in APPLE_REVIEWER_EMAILS. A domain,
-a client field, or the public is_test classification never grants it.
+Designation is APPLE_REVIEWER_USER_IDS: exact ids of users that already exist.
+It is empty by default. Registration creates a new server-generated id, and
+there is no email verification, so a mailbox string is not ownership proof.
+A domain, wildcard, email, or client field never grants the lane.
 Reviewer customers and reviewer experts can discover and book only each other.
 Production experts still have to satisfy phone, IBAN, bank name, and
 freelance-document requirements on the server. Nafath is never taken from
@@ -14,38 +16,38 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from . import models
 
-# One exact mailbox. Rejects domains, wildcards, and "@dalla3.test".
-_EXACT_EMAIL = re.compile(r"^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$")
+# Server ids are u_ + 10 hex chars (see models._id). Anything else is ignored.
+_USER_ID = re.compile(r"^u_[0-9a-f]{10}$")
 # IBAN shape after spaces are removed (15–34 chars). Not a checksum; it rejects blank and fake short values.
 _IBAN = re.compile(r"^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$")
 
-ACTIVE_BOOKING_STATUSES = ("pending_accept", "confirmed", "on_the_way", "arrived", "in_progress")
+ACTIVE_BOOKING_STATUSES = models.ACTIVE_BOOKING_STATUSES
 
 
-def designated_emails() -> frozenset[str]:
-    raw = get_settings().apple_reviewer_emails or ""
+def designated_user_ids() -> frozenset[str]:
+    raw = get_settings().apple_reviewer_user_ids or ""
     found: list[str] = []
     for part in raw.split(","):
-        email = part.strip().lower()
-        if _EXACT_EMAIL.fullmatch(email):
-            found.append(email)
+        user_id = part.strip().lower()
+        if _USER_ID.fullmatch(user_id):
+            found.append(user_id)
     return frozenset(found)
 
 
-def is_designated_email(email: str | None) -> bool:
-    if not email:
+def is_designated_user_id(user_id: str | None) -> bool:
+    if not user_id:
         return False
-    return email.strip().lower() in designated_emails()
+    return user_id.strip().lower() in designated_user_ids()
 
 
 def is_reviewer_user(user: models.User | None) -> bool:
-    return bool(user is not None and is_designated_email(user.email))
+    return bool(user is not None and is_designated_user_id(user.id))
 
 
 def is_reviewer_expert(expert: models.ExpertProfile | None) -> bool:
     if expert is None or expert.user is None:
         return False
-    return is_designated_email(expert.user.email)
+    return is_designated_user_id(expert.user.id)
 
 
 def can_discover_expert(viewer: models.User | None, expert: models.ExpertProfile | None) -> bool:
@@ -70,7 +72,7 @@ def pair_in_reviewer_lane(customer: models.User | None, expert: models.ExpertPro
 
 def sync_reviewer_designation(db: Session, user: models.User) -> bool:
     """Persist the allowlist result on this user only. Never scans or updates other rows."""
-    designated = is_designated_email(user.email)
+    designated = is_designated_user_id(user.id)
     dirty = bool(user.is_apple_reviewer) != designated
     if dirty:
         user.is_apple_reviewer = designated

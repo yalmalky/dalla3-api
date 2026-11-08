@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from .. import models
@@ -94,11 +95,10 @@ def create_booking(body: BookingIn, db: Session = Depends(get_db), user: models.
     while db.get(models.Booking, bid):
         bid = make_booking_id()
 
+    # Resolve the provider before claiming the slot so a missing live provider
+    # does not hold the clock time. The unique index is claimed before any hold,
+    # so a concurrent loser does not create a payment.
     provider = get_payment_provider("mock") if lane else get_payment_provider()
-    pay = provider.hold_escrow(amount=deposit, booking_id=bid, customer_id=user.id)
-    if not pay.ok:
-        raise HTTPException(402, pay.message or "فشل الدفع")
-
     b = models.Booking(
         id=bid,
         customer_id=user.id,
@@ -121,11 +121,22 @@ def create_booking(body: BookingIn, db: Session = Depends(get_db), user: models.
         customer_name=user.name,
         expert_name=e.display_name,
         service_name=" + ".join(s.name for s in q["services"]),
-        payment_provider=pay.provider,
-        payment_ref=pay.ref,
+        payment_provider=provider.name,
+        payment_ref=None,
         reviewer_lane=lane,
     )
     db.add(b)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "هذا الموعد محجوز — اختاري وقت ثاني")
+    pay = provider.hold_escrow(amount=deposit, booking_id=bid, customer_id=user.id)
+    if not pay.ok:
+        db.rollback()
+        raise HTTPException(402, pay.message or "فشل الدفع")
+    b.payment_provider = pay.provider
+    b.payment_ref = pay.ref
     db.add(models.PaymentLedger(
         booking_id=bid, expert_id=e.id, customer_id=user.id,
         kind="escrow_hold", amount=deposit, provider=pay.provider, provider_ref=pay.ref,

@@ -1,15 +1,17 @@
 """Apple reviewer lane. Uses the sqlite engine from conftest and never a remote database."""
 import os
+import threading
 from contextlib import contextmanager
 
 import pytest
 from sqlalchemy import create_engine, inspect
+from sqlalchemy.exc import IntegrityError
 
 from server import models
 from server.auth import hash_password
 from server.config import get_settings
 from server.db import Base, SessionLocal, engine
-from server.reviewer_lane import designated_emails, production_requirements_met
+from server.reviewer_lane import designated_user_ids, production_requirements_met
 from server.schema_updates import downgrade_reviewer_schema, upgrade_reviewer_schema
 
 CUSTOMER = "apple-review-customer@dalla3.test"
@@ -18,6 +20,7 @@ PASSWORD = "secret12"
 WHEN = "2027-06-15"
 REAL_IBAN = "SA03 8000 0000 6080 1016 7519"
 REAL_IBAN_NORMAL = "SA0380000000608010167519"
+INTENDED_EMAILS = f"{CUSTOMER},{EXPERT}"
 
 
 def auth(token: str) -> dict:
@@ -44,6 +47,12 @@ def env(**kwargs):
         get_settings.cache_clear()
 
 
+@contextmanager
+def bind_users(*user_ids: str):
+    with env(APPLE_REVIEWER_USER_IDS=",".join(user_ids), APPLE_REVIEWER_EMAILS=INTENDED_EMAILS):
+        yield
+
+
 def login_or_register(client, email, *, role="customer", phone="", name="مستخدمة"):
     body = {
         "email": email,
@@ -52,11 +61,13 @@ def login_or_register(client, email, *, role="customer", phone="", name="مست�
         "phone": phone,
         "role": role,
         "city": "الرياض",
-        "reviewerLane": True,  # ignored; designation is not a client field
+        "reviewerLane": True,
+        "is_apple_reviewer": True,
+        "nafathVerified": True,
     }
     res = client.post("/api/auth/register", json=body)
     if res.status_code == 400:
-        res = client.post("/api/auth/login", json={"email": email, "password": PASSWORD})
+        res = client.post("/api/auth/login", json={"email": email, "password": PASSWORD, "reviewerLane": True})
     assert res.status_code == 200, res.text
     return res.json()
 
@@ -70,6 +81,7 @@ def expert_payload(**overrides):
         "modes": ["home"],
         "travel_fee": 25,
         "nafath_verified": True,
+        "reviewerLane": True,
         "services": [
             {"category": "makeup", "name": "مكياج سهرة", "duration_min": 90, "price": 200, "description": ""}
         ],
@@ -103,13 +115,20 @@ def ids_of(rows):
     return {row["id"] for row in rows}
 
 
+def user_by_email(email: str) -> models.User:
+    db = SessionLocal()
+    try:
+        return db.query(models.User).filter_by(email=email).one()
+    finally:
+        db.close()
+
+
 def ensure_hidden_expert():
     db = SessionLocal()
     try:
         user = db.query(models.User).filter_by(email="hidden-qa-owner@dalla3.test").one_or_none()
         if user and user.expert_profile:
-            service = user.expert_profile.services[0]
-            return user.expert_profile.id, service.id
+            return user.expert_profile.id, user.expert_profile.services[0].id
         user = models.User(
             email="hidden-qa-owner@dalla3.test",
             password_hash=hash_password(PASSWORD),
@@ -140,40 +159,149 @@ def ensure_hidden_expert():
         db.close()
 
 
+def assert_private(client, token, expert_id, service_id, *, hidden_from_anonymous: bool):
+    """Discovery, services, reviews, slots, quote, booking, and favorites stay closed for this caller."""
+    headers = auth(token)
+    assert expert_id not in ids_of(client.get("/api/experts", headers=headers).json())
+    for path in (
+        f"/api/experts/{expert_id}",
+        f"/api/experts/{expert_id}/services",
+        f"/api/experts/{expert_id}/reviews",
+        f"/api/experts/{expert_id}/slots?date={WHEN}",
+    ):
+        assert client.get(path, headers=headers).status_code == 404
+        if hidden_from_anonymous:
+            assert client.get(path).status_code == 404
+    assert book(client, token, expert_id, service_id).status_code == 404
+    quote = client.post(
+        "/api/bookings/quote",
+        headers=headers,
+        json={
+            "expert_id": expert_id,
+            "service_ids": [service_id],
+            "mode": "home",
+            "date": WHEN,
+            "time": "17:00",
+            "payment_method": "mada",
+        },
+    )
+    assert quote.status_code == 404
+    favorite = client.post(f"/api/me/favorites/{expert_id}", headers=headers)
+    assert favorite.status_code == 404
+    assert expert_id not in client.get("/api/me/favorites", headers=headers).json()
+
+
 def test_suite_stays_on_sqlite():
     assert engine.dialect.name == "sqlite"
 
 
-def test_schema_upgrade_is_idempotent_and_rollback_drops_columns():
+def test_schema_upgrade_is_idempotent_and_rollback_drops_columns_and_slot_index():
     path = "/tmp/dalla3-reviewer-schema-rollback.db"
     if os.path.exists(path):
         os.remove(path)
     local = create_engine(f"sqlite:///{path}")
     Base.metadata.create_all(local)
     assert upgrade_reviewer_schema(local) == []
+    names = {idx["name"] for idx in inspect(local).get_indexes("bookings")}
+    assert "uq_booking_active_slot" in names
     assert "is_apple_reviewer" in {c["name"] for c in inspect(local).get_columns("users")}
-    assert "reviewer_lane" in {c["name"] for c in inspect(local).get_columns("bookings")}
 
     removed = downgrade_reviewer_schema(local)
+    assert "bookings.uq_booking_active_slot" in removed
     assert "users.is_apple_reviewer" in removed
-    assert "bookings.reviewer_lane" in removed
+    assert "uq_booking_active_slot" not in {idx["name"] for idx in inspect(local).get_indexes("bookings")}
     assert "is_apple_reviewer" not in {c["name"] for c in inspect(local).get_columns("users")}
 
     added = upgrade_reviewer_schema(local)
     assert "users.is_apple_reviewer" in added
     assert "bookings.reviewer_lane" in added
+    assert "bookings.uq_booking_active_slot" in added
     assert upgrade_reviewer_schema(local) == []
     local.dispose()
 
 
-def test_domain_and_wildcard_entries_are_not_designation():
-    with env(APPLE_REVIEWER_EMAILS="dalla3.test,@dalla3.test,*@dalla3.test"):
-        assert designated_emails() == frozenset()
+def test_malformed_and_wildcard_config_designates_nobody():
+    junk = [
+        "",
+        "*",
+        "u_*",
+        "u_",
+        "u_123",
+        "u_0123456789extra",
+        "e_0123456789",
+        "*@dalla3.test",
+        "@dalla3.test",
+        "dalla3.test",
+        CUSTOMER,
+        EXPERT,
+        f"{CUSTOMER},{EXPERT}",
+        "u_deadbeef00;drop",
+        "' OR 1=1",
+        "../u_deadbeef00",
+    ]
+    for raw in junk:
+        with env(APPLE_REVIEWER_USER_IDS=raw, APPLE_REVIEWER_EMAILS=INTENDED_EMAILS):
+            assert designated_user_ids() == frozenset()
+    with env(APPLE_REVIEWER_USER_IDS=f"*,{CUSTOMER},u_*,u_deadbeef00,e_0123456789"):
+        assert designated_user_ids() == frozenset({"u_deadbeef00"})
+
+
+def test_signup_of_intended_mailbox_before_designation_grants_nothing(client):
+    """The email allowlist and a client flag must not make the first registrant a reviewer."""
+    with env(APPLE_REVIEWER_USER_IDS="", APPLE_REVIEWER_EMAILS=INTENDED_EMAILS):
+        stranger = login_or_register(client, EXPERT, role="expert", phone="", name="غريبة")
+        customer = login_or_register(client, CUSTOMER, name="عميلة المراجعة")
+    assert stranger["user"]["reviewerLane"] is False
+    assert customer["user"]["reviewerLane"] is False
+    db = SessionLocal()
+    try:
+        expert_user = db.query(models.User).filter_by(email=EXPERT).one()
+        customer_user = db.query(models.User).filter_by(email=CUSTOMER).one()
+        assert expert_user.is_apple_reviewer is False
+        assert customer_user.is_apple_reviewer is False
+        assert expert_user.is_test is True
+    finally:
+        db.close()
+    me = client.get("/api/auth/me", headers=auth(stranger["access_token"]))
+    assert me.json()["reviewerLane"] is False
+    profile = client.get("/api/me/profile", headers=auth(customer["access_token"]))
+    assert profile.json()["reviewerLane"] is False
+
+    # A pre-chosen id that is not this new row still does not attach to the signup.
+    with env(APPLE_REVIEWER_USER_IDS="u_deadbeef00", APPLE_REVIEWER_EMAILS=INTENDED_EMAILS):
+        again = client.post("/api/auth/login", json={"email": EXPERT, "password": PASSWORD, "reviewerLane": True})
+        assert again.status_code == 200
+        assert again.json()["user"]["reviewerLane"] is False
+        assert again.json()["user"]["id"] != "u_deadbeef00"
+
+
+def test_nonreviewer_cannot_claim_lane_or_keep_fake_verified_fields(client):
+    login_or_register(client, EXPERT, role="expert", phone="", name="مراجعة خبيرة")
+    token = client.post("/api/auth/login", json={"email": EXPERT, "password": PASSWORD}).json()["access_token"]
+    held = save_expert(
+        client,
+        token,
+        display_name="قبل التعيين",
+        iban=REAL_IBAN,
+        bank_name="Fake Bank",
+        freelance_number="000000",
+        nafath_verified=True,
+    )
+    assert held["reviewerLane"] is False
+    assert held["nafathVerified"] is False
+    assert held["status"] == "pending"
+    assert held["id"] not in ids_of(client.get("/api/experts").json())
+    db = SessionLocal()
+    try:
+        row = db.get(models.ExpertProfile, held["id"])
+        assert row.nafath_verified is False
+        assert row.user.is_apple_reviewer is False
+        assert row.status == "pending"
+    finally:
+        db.close()
 
 
 def test_normal_onboarding_unaffected_and_requirements_enforced(client):
-    """A completed non-reviewer application still publishes. The reviewer waiver does not apply,
-    and the client cannot grant itself a Nafath badge or skip the production requirements."""
     ready = login_or_register(
         client, "nora.expert@gmail.com", role="expert", phone="0551234567", name="نورة"
     )
@@ -191,11 +319,8 @@ def test_normal_onboarding_unaffected_and_requirements_enforced(client):
     assert published["nafathVerified"] is False
     assert published["status"] == "approved"
     assert published["services"][0]["name"] == "مكياج سهرة"
-
-    listed = client.get("/api/experts")
-    assert listed.status_code == 200
-    assert published["id"] in ids_of(listed.json())
-    public = next(row for row in listed.json() if row["id"] == published["id"])
+    assert published["id"] in ids_of(client.get("/api/experts").json())
+    public = next(row for row in client.get("/api/experts").json() if row["id"] == published["id"])
     assert public["nafathVerified"] is False
     assert public["reviewerLane"] is False
 
@@ -211,15 +336,13 @@ def test_normal_onboarding_unaffected_and_requirements_enforced(client):
     finally:
         db.close()
 
-    incomplete = login_or_register(
-        client, "incomplete.expert@gmail.com", role="expert", phone="", name="ناقصة"
-    )
+    incomplete = login_or_register(client, "incomplete.expert@gmail.com", role="expert", phone="", name="ناقصة")
     held = save_expert(
         client,
         incomplete["access_token"],
         display_name="بدون وثائق",
         nafath_verified=True,
-        iban="",
+        iban="0000",
         bank_name="",
         freelance_number="",
     )
@@ -229,14 +352,9 @@ def test_normal_onboarding_unaffected_and_requirements_enforced(client):
     assert held["id"] not in ids_of(client.get("/api/experts").json())
     assert client.get(f"/api/experts/{held['id']}").status_code == 404
 
-    me = client.get("/api/auth/me", headers=auth(ready["access_token"]))
-    assert me.json()["reviewerLane"] is False
 
-
-def test_untrusted_test_email_cannot_access_hidden_or_reviewer_experts(client):
+def test_cross_lane_discovery_services_slots_favorites_and_booking(client):
     hidden_id, hidden_service = ensure_hidden_expert()
-    reviewer = login_or_register(client, EXPERT, role="expert", phone="", name="مراجعة خبيرة")
-    reviewer_profile = save_expert(client, reviewer["access_token"], display_name="خبيرة المراجعة")
     real = login_or_register(
         client, "public.expert@gmail.com", role="expert", phone="0550001112", name="عامة"
     )
@@ -248,207 +366,236 @@ def test_untrusted_test_email_cannot_access_hidden_or_reviewer_experts(client):
         bank_name="SNB",
         freelance_number="FL-999111",
     )
-
-    outsider = login_or_register(client, "untrusted-qa@dalla3.test", role="customer", name="تجربة")
-    assert outsider["user"]["reviewerLane"] is False
-    token = outsider["access_token"]
-    db = SessionLocal()
-    try:
-        user = db.query(models.User).filter_by(email="untrusted-qa@dalla3.test").one()
-        assert user.is_test is True
-        assert user.is_apple_reviewer is False
-    finally:
-        db.close()
-
-    listed = ids_of(client.get("/api/experts", headers=auth(token)).json())
-    anon = ids_of(client.get("/api/experts").json())
-    assert real_profile["id"] in listed and real_profile["id"] in anon
-    assert hidden_id not in listed and hidden_id not in anon
-    assert reviewer_profile["id"] not in listed and reviewer_profile["id"] not in anon
-
-    for expert_id in (hidden_id, reviewer_profile["id"]):
-        for path in (
-            f"/api/experts/{expert_id}",
-            f"/api/experts/{expert_id}/services",
-            f"/api/experts/{expert_id}/reviews",
-            f"/api/experts/{expert_id}/slots?date={WHEN}",
-        ):
-            assert client.get(path, headers=auth(token)).status_code == 404
-            assert client.get(path).status_code == 404
-        assert book(client, token, expert_id, hidden_service).status_code == 404
-
-    favorite = client.post(f"/api/me/favorites/{hidden_id}", headers=auth(token))
-    assert favorite.status_code == 404
-    assert hidden_id not in client.get("/api/me/favorites", headers=auth(token)).json()
-
-
-def test_public_signup_cannot_self_grant_by_domain_and_revocation_is_immediate(client):
-    with env(APPLE_REVIEWER_EMAILS=""):
-        created = login_or_register(client, "new-qa@dalla3.test")
-        assert created["user"]["reviewerLane"] is False
-        existing = client.post("/api/auth/login", json={"email": CUSTOMER, "password": PASSWORD})
-        if existing.status_code == 200:
-            assert existing.json()["user"]["reviewerLane"] is False
-            listed = ids_of(client.get("/api/experts", headers=auth(existing.json()["access_token"])).json())
-            reviewer = SessionLocal()
-            try:
-                profile = (
-                    reviewer.query(models.ExpertProfile)
-                    .join(models.User)
-                    .filter(models.User.email == EXPERT)
-                    .one_or_none()
-                )
-                if profile is not None:
-                    assert profile.id not in listed
-            finally:
-                reviewer.close()
-
-    # Restored allowlist designates the exact mailbox only.
-    designated = login_or_register(client, CUSTOMER, name="عميلة المراجعة")
-    assert designated["user"]["reviewerLane"] is True
-    profile = client.get("/api/me/profile", headers=auth(designated["access_token"]))
-    assert profile.json()["reviewerLane"] is True
-    lookalike = login_or_register(client, "apple-review-customer@dalla3.test.evil.com")
-    # evil.com is not a test domain and is not on the allowlist.
-    assert lookalike["user"]["reviewerLane"] is False
-
-
-def test_designated_reviewer_customer_cannot_book_real_or_hidden_experts(client):
-    hidden_id, hidden_service = ensure_hidden_expert()
-    real = login_or_register(
-        client, "bookable.real@gmail.com", role="expert", phone="0551239876", name="حقيقية"
-    )
-    real_profile = save_expert(
-        client,
-        real["access_token"],
-        display_name="خبيرة حقيقية",
-        iban=REAL_IBAN,
-        bank_name="Al Rajhi",
-        freelance_number="FL-555000",
-    )
-    customer = login_or_register(client, CUSTOMER, name="عميلة المراجعة")
-    assert customer["user"]["reviewerLane"] is True
-    token = customer["access_token"]
-    listed = ids_of(client.get("/api/experts", headers=auth(token)).json())
-    assert real_profile["id"] not in listed
-    assert hidden_id not in listed
-
-    real_service = real_profile["services"][0]["id"]
-    assert book(client, token, real_profile["id"], real_service).status_code == 404
-    assert book(client, token, hidden_id, hidden_service).status_code == 404
-    quote = client.post(
-        "/api/bookings/quote",
-        headers=auth(token),
-        json={
-            "expert_id": real_profile["id"],
-            "service_ids": [real_service],
-            "mode": "home",
-            "date": WHEN,
-            "time": "17:00",
-            "payment_method": "mada",
-        },
-    )
-    assert quote.status_code == 404
-    favorite = client.post(f"/api/me/favorites/{real_profile['id']}", headers=auth(token))
-    assert favorite.status_code == 404
-
-
-def test_permitted_pair_can_book_accept_and_cancel(client):
     customer = login_or_register(client, CUSTOMER, name="عميلة المراجعة")
     expert = login_or_register(client, EXPERT, role="expert", phone="", name="مراجعة خبيرة")
-    profile = save_expert(
-        client,
-        expert["access_token"],
-        display_name="خبيرة المراجعة",
-        iban="SA0380000000608010167519",
-        bank_name="Fake Bank",
-        freelance_number="000000",
-        nafath_verified=True,
-    )
-    assert profile["reviewerLane"] is True
-    assert profile["nafathVerified"] is False
-    assert profile["status"] == "approved"
-    assert profile["id"] not in ids_of(client.get("/api/experts").json())
-    assert profile["id"] in ids_of(
-        client.get("/api/experts", headers=auth(customer["access_token"])).json()
-    )
+    # Not designated yet: the intended expert profile stays off the public catalog and off the lane.
+    with bind_users(customer["user"]["id"], expert["user"]["id"]):
+        expert_profile = save_expert(client, expert["access_token"], display_name="خبيرة المراجعة")
+        outsider = login_or_register(client, "untrusted-qa@dalla3.test", name="تجربة")
+        assert outsider["user"]["reviewerLane"] is False
+        db = SessionLocal()
+        try:
+            row = db.query(models.User).filter_by(email="untrusted-qa@dalla3.test").one()
+            assert row.is_test is True
+            assert row.is_apple_reviewer is False
+        finally:
+            db.close()
 
-    db = SessionLocal()
-    try:
-        row = db.get(models.ExpertProfile, profile["id"])
-        assert row.iban == ""
-        assert row.bank_name == ""
-        assert row.freelance_number == ""
-        assert row.nafath_verified is False
-        assert row.is_test is True
-        assert row.user.phone == ""
-        assert row.user.is_apple_reviewer is True
-    finally:
-        db.close()
+        real_service = real_profile["services"][0]["id"]
+        reviewer_service = expert_profile["services"][0]["id"]
+        assert_private(client, outsider["access_token"], hidden_id, hidden_service, hidden_from_anonymous=True)
+        assert_private(
+            client, outsider["access_token"], expert_profile["id"], reviewer_service, hidden_from_anonymous=True
+        )
+        assert real_profile["id"] in ids_of(
+            client.get("/api/experts", headers=auth(outsider["access_token"])).json()
+        )
+        assert_private(
+            client, customer["access_token"], real_profile["id"], real_service, hidden_from_anonymous=False
+        )
+        assert_private(client, customer["access_token"], hidden_id, hidden_service, hidden_from_anonymous=True)
+        assert expert_profile["id"] in ids_of(
+            client.get("/api/experts", headers=auth(customer["access_token"])).json()
+        )
+        assert expert_profile["id"] not in ids_of(client.get("/api/experts").json())
 
-    service_id = profile["services"][0]["id"]
-    created = book(client, customer["access_token"], profile["id"], service_id, time="15:30")
-    assert created.status_code == 200, created.text
-    booking = created.json()
-    assert booking["status"] == "pending_accept"
-    assert booking["reviewerLane"] is True
-    assert booking["paymentProvider"] == "mock"
-    assert booking["paymentRef"].startswith("mock_")
 
-    accepted = client.post(f"/api/bookings/{booking['id']}/accept", headers=auth(expert["access_token"]))
-    assert accepted.status_code == 200, accepted.text
-    assert accepted.json()["status"] == "confirmed"
+def test_permitted_pair_only_after_both_existing_ids_are_bound(client):
+    customer = login_or_register(client, CUSTOMER, name="عميلة المراجعة")
+    expert = login_or_register(client, EXPERT, role="expert", phone="", name="مراجعة خبيرة")
+    # Binding only one side does not open the pair.
+    with bind_users(customer["user"]["id"]):
+        refreshed = client.post("/api/auth/login", json={"email": CUSTOMER, "password": PASSWORD})
+        assert refreshed.json()["user"]["reviewerLane"] is True
+        expert_login = client.post("/api/auth/login", json={"email": EXPERT, "password": PASSWORD})
+        assert expert_login.json()["user"]["reviewerLane"] is False
 
-    cancelled = client.post(f"/api/bookings/{booking['id']}/cancel", headers=auth(customer["access_token"]))
-    assert cancelled.status_code == 200, cancelled.text
-    assert cancelled.json()["status"] == "cancelled"
-    assert cancelled.json()["paymentProvider"] == "mock"
+    with bind_users(customer["user"]["id"], expert["user"]["id"]):
+        customer = login_or_register(client, CUSTOMER, name="عميلة المراجعة")
+        expert = login_or_register(client, EXPERT, role="expert", phone="", name="مراجعة خبيرة")
+        assert customer["user"]["reviewerLane"] is True
+        assert expert["user"]["reviewerLane"] is True
+        profile = save_expert(
+            client,
+            expert["access_token"],
+            display_name="خبيرة المراجعة",
+            iban=REAL_IBAN,
+            bank_name="Fake Bank",
+            freelance_number="000000",
+            nafath_verified=True,
+        )
+        assert profile["reviewerLane"] is True
+        assert profile["nafathVerified"] is False
+        assert profile["status"] == "approved"
+        assert profile["id"] not in ids_of(client.get("/api/experts").json())
+        db = SessionLocal()
+        try:
+            row = db.get(models.ExpertProfile, profile["id"])
+            assert row.iban == ""
+            assert row.bank_name == ""
+            assert row.freelance_number == ""
+            assert row.nafath_verified is False
+            assert row.is_test is True
+            assert row.user.phone == ""
+            assert row.user.is_apple_reviewer is True
+        finally:
+            db.close()
 
-    db = SessionLocal()
-    try:
-        row = db.get(models.Booking, booking["id"])
-        assert row.reviewer_lane is True
-        assert row.payment_provider == "mock"
-        kinds = {
-            (line.kind, line.provider)
-            for line in db.query(models.PaymentLedger).filter_by(booking_id=booking["id"]).all()
-        }
-        assert ("escrow_hold", "mock") in kinds
-        assert ("refund", "mock") in kinds
-    finally:
-        db.close()
+        created = book(
+            client, customer["access_token"], profile["id"], profile["services"][0]["id"], time="15:30"
+        )
+        assert created.status_code == 200, created.text
+        booking = created.json()
+        assert booking["status"] == "pending_accept"
+        assert booking["reviewerLane"] is True
+        assert booking["paymentProvider"] == "mock"
+        assert booking["paymentRef"].startswith("mock_")
 
-    stranger = login_or_register(client, "stranger.customer@gmail.com", phone="0551112233")
-    assert client.get(f"/api/bookings/{booking['id']}", headers=auth(stranger["access_token"])).status_code == 403
+        accepted = client.post(
+            f"/api/bookings/{booking['id']}/accept", headers=auth(expert["access_token"])
+        )
+        assert accepted.status_code == 200, accepted.text
+        assert accepted.json()["status"] == "confirmed"
+        cancelled = client.post(
+            f"/api/bookings/{booking['id']}/cancel", headers=auth(customer["access_token"])
+        )
+        assert cancelled.status_code == 200, cancelled.text
+        assert cancelled.json()["status"] == "cancelled"
+        assert cancelled.json()["paymentProvider"] == "mock"
+
+        db = SessionLocal()
+        try:
+            row = db.get(models.Booking, booking["id"])
+            assert row.reviewer_lane is True
+            assert row.payment_provider == "mock"
+            kinds = {
+                (line.kind, line.provider)
+                for line in db.query(models.PaymentLedger).filter_by(booking_id=booking["id"]).all()
+            }
+            assert ("escrow_hold", "mock") in kinds
+            assert ("refund", "mock") in kinds
+        finally:
+            db.close()
+
+    # Removing the ids revokes the lane on the next request. The old booking stays marked.
+    revoked = client.post("/api/auth/login", json={"email": CUSTOMER, "password": PASSWORD})
+    assert revoked.json()["user"]["reviewerLane"] is False
 
 
 def test_duplicate_active_slot_is_rejected_until_the_first_booking_ends(client):
     customer = login_or_register(client, CUSTOMER, name="عميلة المراجعة")
     expert = login_or_register(client, EXPERT, role="expert", phone="", name="مراجعة خبيرة")
-    profile = save_expert(client, expert["access_token"], display_name="خبيرة المراجعة")
-    service_id = profile["services"][0]["id"]
+    with bind_users(customer["user"]["id"], expert["user"]["id"]):
+        profile = save_expert(client, expert["access_token"], display_name="خبيرة المراجعة")
+        service_id = profile["services"][0]["id"]
+        first = book(client, customer["access_token"], profile["id"], service_id, time="18:30")
+        assert first.status_code == 200, first.text
+        second = book(client, customer["access_token"], profile["id"], service_id, time="18:30")
+        assert second.status_code == 409
+        cancelled = client.post(
+            f"/api/bookings/{first.json()['id']}/cancel", headers=auth(customer["access_token"])
+        )
+        assert cancelled.status_code == 200, cancelled.text
+        again = book(client, customer["access_token"], profile["id"], service_id, time="18:30")
+        assert again.status_code == 200, again.text
+        client.post(f"/api/bookings/{again.json()['id']}/cancel", headers=auth(customer["access_token"]))
 
-    first = book(client, customer["access_token"], profile["id"], service_id, time="18:30")
-    assert first.status_code == 200, first.text
-    second = book(client, customer["access_token"], profile["id"], service_id, time="18:30")
-    assert second.status_code == 409
 
-    cancelled = client.post(
-        f"/api/bookings/{first.json()['id']}/cancel", headers=auth(customer["access_token"])
-    )
-    assert cancelled.status_code == 200, cancelled.text
-    again = book(client, customer["access_token"], profile["id"], service_id, time="18:30")
-    assert again.status_code == 200, again.text
-    client.post(f"/api/bookings/{again.json()['id']}/cancel", headers=auth(customer["access_token"]))
+def test_active_slot_index_rejects_a_second_active_row_and_allows_reuse_after_cancel(client):
+    db = SessionLocal()
+    try:
+        owner = models.User(
+            email="slot-index-owner@gmail.com",
+            password_hash=hash_password(PASSWORD),
+            name="فهرس",
+            role="expert",
+            phone="0551002000",
+            is_apple_reviewer=False,
+        )
+        db.add(owner)
+        db.flush()
+        expert = models.ExpertProfile(
+            user_id=owner.id, display_name="فهرس", status="approved", is_test=False, nafath_verified=False
+        )
+        db.add(expert)
+        db.commit()
+        customer_id, expert_id = owner.id, expert.id
+    finally:
+        db.close()
+
+    def make(suffix: str, status: str) -> models.Booking:
+        return models.Booking(
+            id=f"DL-slot-{suffix}",
+            customer_id=customer_id,
+            expert_id=expert_id,
+            service_ids=[],
+            mode="home",
+            date="2027-08-01",
+            time="14:00",
+            subtotal=100,
+            travel_fee=0,
+            total=100,
+            deposit=100,
+            remaining=0,
+            status=status,
+            start_code="1234",
+            customer_name="فهرس",
+            expert_name="فهرس",
+            payment_provider="mock",
+            reviewer_lane=False,
+        )
+
+    first = SessionLocal()
+    second = SessionLocal()
+    try:
+        first.add(make("a", "pending_accept"))
+        first.commit()
+        second.add(make("b", "confirmed"))
+        with pytest.raises(IntegrityError):
+            second.commit()
+        second.rollback()
+        active = first.query(models.Booking).filter_by(id="DL-slot-a").one()
+        active.status = "cancelled"
+        first.commit()
+        second.add(make("c", "pending_accept"))
+        second.commit()
+    finally:
+        first.close()
+        second.close()
+
+    # Two commits racing on a free active slot: one wins, the unique index rejects the other.
+    barrier = threading.Barrier(2)
+    results: list[str] = []
+
+    def race(suffix: str):
+        session = SessionLocal()
+        try:
+            barrier.wait(timeout=5)
+            row = make(suffix, "pending_accept")
+            row.date = "2027-08-02"
+            row.time = "16:00"
+            session.add(row)
+            session.commit()
+            results.append("ok")
+        except IntegrityError:
+            session.rollback()
+            results.append("conflict")
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=race, args=(suffix,)) for suffix in ("race1", "race2")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+        assert not thread.is_alive()
+    assert sorted(results) == ["conflict", "ok"]
 
 
 def test_reviewer_payment_is_forced_to_mock(client):
     customer = login_or_register(client, CUSTOMER, name="عميلة المراجعة")
     expert = login_or_register(client, EXPERT, role="expert", phone="", name="مراجعة خبيرة")
-    profile = save_expert(client, expert["access_token"], display_name="خبيرة المراجعة")
-    real = login_or_register(
-        client, "pay.real@gmail.com", role="expert", phone="0557776655", name="دفع"
-    )
+    real = login_or_register(client, "pay.real@gmail.com", role="expert", phone="0557776655", name="دفع")
     real_profile = save_expert(
         client,
         real["access_token"],
@@ -458,44 +605,42 @@ def test_reviewer_payment_is_forced_to_mock(client):
         freelance_number="FL-777666",
     )
     real_customer = login_or_register(client, "pay.customer@gmail.com", phone="0557776644", name="عميلة دفع")
-
-    with env(PAYMENT_PROVIDER="moyasar"):
-        lane = book(
-            client,
-            customer["access_token"],
-            profile["id"],
-            profile["services"][0]["id"],
-            time="20:00",
-            method="mada",
-        )
-        assert lane.status_code == 200, lane.text
-        assert lane.json()["paymentProvider"] == "mock"
-        assert lane.json()["reviewerLane"] is True
-        assert lane.json()["paymentRef"].startswith("mock_")
-
-        with pytest.raises(RuntimeError, match="Moyasar"):
-            book(
+    with bind_users(customer["user"]["id"], expert["user"]["id"]):
+        profile = save_expert(client, expert["access_token"], display_name="خبيرة المراجعة")
+        with env(PAYMENT_PROVIDER="moyasar", APPLE_REVIEWER_USER_IDS=f"{customer['user']['id']},{expert['user']['id']}"):
+            lane = book(
                 client,
-                real_customer["access_token"],
-                real_profile["id"],
-                real_profile["services"][0]["id"],
-                time="21:30",
+                customer["access_token"],
+                profile["id"],
+                profile["services"][0]["id"],
+                time="20:00",
             )
-
-    db = SessionLocal()
-    try:
-        row = db.get(models.Booking, lane.json()["id"])
-        assert row.payment_provider == "mock"
-        assert row.reviewer_lane is True
-        assert (
-            db.query(models.Booking)
-            .filter_by(customer_id=real_customer["user"]["id"], expert_id=real_profile["id"])
-            .count()
-            == 0
-        )
-    finally:
-        db.close()
-    client.post(f"/api/bookings/{lane.json()['id']}/cancel", headers=auth(customer["access_token"]))
+            assert lane.status_code == 200, lane.text
+            assert lane.json()["paymentProvider"] == "mock"
+            assert lane.json()["reviewerLane"] is True
+            assert lane.json()["paymentRef"].startswith("mock_")
+            with pytest.raises(RuntimeError, match="Moyasar"):
+                book(
+                    client,
+                    real_customer["access_token"],
+                    real_profile["id"],
+                    real_profile["services"][0]["id"],
+                    time="21:30",
+                )
+        db = SessionLocal()
+        try:
+            row = db.get(models.Booking, lane.json()["id"])
+            assert row.payment_provider == "mock"
+            assert row.reviewer_lane is True
+            assert (
+                db.query(models.Booking)
+                .filter_by(customer_id=real_customer["user"]["id"], expert_id=real_profile["id"])
+                .count()
+                == 0
+            )
+        finally:
+            db.close()
+        client.post(f"/api/bookings/{lane.json()['id']}/cancel", headers=auth(customer["access_token"]))
 
 
 def test_production_requirement_helper_rejects_blank_identifiers():

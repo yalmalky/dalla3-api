@@ -48,7 +48,7 @@ async def lifespan(_: FastAPI):
         if col not in ucols:
             with engine.begin() as conn:
                 conn.exec_driver_sql(f"ALTER TABLE users ADD COLUMN {col} VARCHAR(255)")
-    # Reviewer lane columns. No domain backfill — designation stays in APPLE_REVIEWER_EMAILS.
+    # Reviewer columns and the active-slot unique index. No privilege backfill.
     upgrade_reviewer_schema(engine)
     db = SessionLocal()
     try:

@@ -6,9 +6,8 @@ import os
 os.environ["DATABASE_URL"] = "sqlite:////tmp/dalla3-reviewer-lane-test.db"
 os.environ["JWT_SECRET"] = "reviewer-lane-test-secret"
 os.environ["PAYMENT_PROVIDER"] = "mock"
-os.environ["APPLE_REVIEWER_EMAILS"] = (
-    "apple-review-customer@dalla3.test,apple-review-expert@dalla3.test"
-)
+os.environ["APPLE_REVIEWER_USER_IDS"] = ""
+os.environ.pop("APPLE_REVIEWER_EMAILS", None)
 os.environ.pop("ADMIN_TOKEN", None)
 
 db_path = "/tmp/dalla3-reviewer-lane-test.db"

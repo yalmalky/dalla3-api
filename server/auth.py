@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .db import get_db
 from . import models
+from .reviewer_lane import sync_reviewer_designation
 
 bearer = HTTPBearer(auto_error=False)
 
@@ -53,6 +54,7 @@ def get_current_user(
     user = db.get(models.User, uid)
     if not user:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "المستخدم غير موجود")
+    sync_reviewer_designation(db, user)
     return user
 
 

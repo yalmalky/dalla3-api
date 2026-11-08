@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from .. import models
 from ..auth import get_current_user
 from ..db import get_db
+from ..reviewer_lane import can_discover_expert, is_designated_user_id
 from ..schemas import AddressIn
 
 router = APIRouter(prefix="/me", tags=["me"])
@@ -20,6 +21,7 @@ def profile(user: models.User = Depends(get_current_user), db: Session = Depends
         "city": user.city,
         "role": user.role,
         "email": user.email,
+        "reviewerLane": is_designated_user_id(user.id),
         "addresses": [
             {"id": a.id, "label": a.label, "details": a.details, "location": {"lat": a.lat, "lng": a.lng}}
             for a in addrs
@@ -36,10 +38,24 @@ def add_address(body: AddressIn, user: models.User = Depends(get_current_user), 
     return {"id": a.id, "label": a.label, "details": a.details, "location": {"lat": a.lat, "lng": a.lng}}
 
 
+def _visible_favorite_ids(db: Session, user: models.User) -> list[str]:
+    favs = db.query(models.Favorite).filter_by(user_id=user.id).all()
+    if not favs:
+        return []
+    ids = [f.expert_id for f in favs]
+    experts = (
+        db.query(models.ExpertProfile)
+        .options(joinedload(models.ExpertProfile.user))
+        .filter(models.ExpertProfile.id.in_(ids))
+        .all()
+    )
+    visible = {e.id for e in experts if can_discover_expert(user, e)}
+    return [i for i in ids if i in visible]
+
+
 @router.get("/favorites")
 def favorites(user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    hidden = {e.id for e in db.query(models.ExpertProfile.id).filter(models.ExpertProfile.is_test.is_(True))}
-    return [f.expert_id for f in db.query(models.Favorite).filter_by(user_id=user.id).all() if f.expert_id not in hidden]
+    return _visible_favorite_ids(db, user)
 
 
 @router.post("/favorites/{expert_id}")
@@ -48,9 +64,17 @@ def toggle_favorite(expert_id: str, user: models.User = Depends(get_current_user
     if existing:
         db.delete(existing)
     else:
+        expert = (
+            db.query(models.ExpertProfile)
+            .options(joinedload(models.ExpertProfile.user))
+            .filter_by(id=expert_id)
+            .first()
+        )
+        if not can_discover_expert(user, expert):
+            raise HTTPException(404, "الخبيرة غير موجودة")
         db.add(models.Favorite(user_id=user.id, expert_id=expert_id))
     db.commit()
-    return [f.expert_id for f in db.query(models.Favorite).filter_by(user_id=user.id).all()]
+    return _visible_favorite_ids(db, user)
 
 
 @router.get("/notifications")

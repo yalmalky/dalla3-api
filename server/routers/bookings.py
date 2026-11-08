@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from .. import models
@@ -7,9 +8,9 @@ from ..config import get_settings
 from ..db import get_db
 from ..money import BNPL_SURCHARGE_RATE, bnpl_surcharge_for, deposit_for, is_bnpl, make_booking_id, make_start_code
 from ..payments import get_payment_provider
+from ..reviewer_lane import ACTIVE_BOOKING_STATUSES, can_discover_expert, pair_in_reviewer_lane
 from ..schemas import BookingIn, RateIn, RejectIn, StartCodeIn
 from ..serializers import booking_out, notify
-from ..test_accounts import is_hidden
 
 router = APIRouter(prefix="/bookings", tags=["bookings"])
 
@@ -34,10 +35,26 @@ def _quote(expert: models.ExpertProfile, service_ids: list[str], mode: str):
     }
 
 
+def _load_expert(db: Session, expert_id: str) -> models.ExpertProfile | None:
+    return (
+        db.query(models.ExpertProfile)
+        .options(joinedload(models.ExpertProfile.services), joinedload(models.ExpertProfile.user))
+        .filter_by(id=expert_id)
+        .first()
+    )
+
+
+def _provider_for(booking: models.Booking):
+    # Lane bookings stay on the simulator even if PAYMENT_PROVIDER later changes, or the row was edited.
+    if booking.reviewer_lane:
+        return get_payment_provider("mock")
+    return get_payment_provider(booking.payment_provider)
+
+
 @router.post("/quote")
 def quote(body: BookingIn, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
-    e = db.query(models.ExpertProfile).options(joinedload(models.ExpertProfile.services)).filter_by(id=body.expert_id).first()
-    if not e or (is_hidden(e) and not user.is_test):
+    e = _load_expert(db, body.expert_id)
+    if e is None or not can_discover_expert(user, e):
         raise HTTPException(404, "الخبيرة غير موجودة")
     q = _quote(e, body.service_ids, body.mode)
     q.pop("services", None)
@@ -46,9 +63,18 @@ def quote(body: BookingIn, db: Session = Depends(get_db), user: models.User = De
 
 @router.post("")
 def create_booking(body: BookingIn, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
-    e = db.query(models.ExpertProfile).options(joinedload(models.ExpertProfile.services)).filter_by(id=body.expert_id).first()
-    if not e or (is_hidden(e) and not user.is_test):
+    e = _load_expert(db, body.expert_id)
+    if e is None or not can_discover_expert(user, e):
         raise HTTPException(404, "الخبيرة غير موجودة")
+    lane = pair_in_reviewer_lane(user, e)
+    clash = db.query(models.Booking).filter(
+        models.Booking.expert_id == e.id,
+        models.Booking.date == body.date,
+        models.Booking.time == body.time,
+        models.Booking.status.in_(ACTIVE_BOOKING_STATUSES),
+    ).first()
+    if clash:
+        raise HTTPException(409, "هذا الموعد محجوز — اختاري وقت ثاني")
     q = _quote(e, body.service_ids, body.mode)
     bnpl = is_bnpl(body.payment_method)
     # Backend computes surcharge — never trust a client-supplied fee.
@@ -69,11 +95,10 @@ def create_booking(body: BookingIn, db: Session = Depends(get_db), user: models.
     while db.get(models.Booking, bid):
         bid = make_booking_id()
 
-    provider = get_payment_provider()
-    pay = provider.hold_escrow(amount=deposit, booking_id=bid, customer_id=user.id)
-    if not pay.ok:
-        raise HTTPException(402, pay.message or "فشل الدفع")
-
+    # Resolve the provider before claiming the slot so a missing live provider
+    # does not hold the clock time. The unique index is claimed before any hold,
+    # so a concurrent loser does not create a payment.
+    provider = get_payment_provider("mock") if lane else get_payment_provider()
     b = models.Booking(
         id=bid,
         customer_id=user.id,
@@ -96,10 +121,22 @@ def create_booking(body: BookingIn, db: Session = Depends(get_db), user: models.
         customer_name=user.name,
         expert_name=e.display_name,
         service_name=" + ".join(s.name for s in q["services"]),
-        payment_provider=pay.provider,
-        payment_ref=pay.ref,
+        payment_provider=provider.name,
+        payment_ref=None,
+        reviewer_lane=lane,
     )
     db.add(b)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "هذا الموعد محجوز — اختاري وقت ثاني")
+    pay = provider.hold_escrow(amount=deposit, booking_id=bid, customer_id=user.id)
+    if not pay.ok:
+        db.rollback()
+        raise HTTPException(402, pay.message or "فشل الدفع")
+    b.payment_provider = pay.provider
+    b.payment_ref = pay.ref
     db.add(models.PaymentLedger(
         booking_id=bid, expert_id=e.id, customer_id=user.id,
         kind="escrow_hold", amount=deposit, provider=pay.provider, provider_ref=pay.ref,
@@ -164,7 +201,7 @@ def reject(booking_id: str, body: RejectIn, user: models.User = Depends(get_curr
     b.status = "rejected"
     b.reject_reason = body.reason
     b.suggested_time = body.suggested_time
-    provider = get_payment_provider(b.payment_provider)
+    provider = _provider_for(b)
     ref = provider.refund(amount=b.deposit, booking_id=b.id, reason=body.reason)
     db.add(models.PaymentLedger(
         booking_id=b.id, expert_id=b.expert_id, customer_id=b.customer_id,
@@ -196,7 +233,7 @@ def cancel_by_customer(booking_id: str, user: models.User = Depends(get_current_
     if b.status == "confirmed" and (appt is None or appt - datetime.now(riyadh) < timedelta(hours=24)):
         raise HTTPException(400, "الإلغاء المجاني متاح قبل الموعد بـ24 ساعة — تواصلي مع الدعم للإلغاء المتأخر")
     b.status = "cancelled"
-    provider = get_payment_provider(b.payment_provider)
+    provider = _provider_for(b)
     ref = provider.refund(amount=b.deposit, booking_id=b.id, reason="customer_cancel")
     db.add(models.PaymentLedger(
         booking_id=b.id, expert_id=b.expert_id, customer_id=b.customer_id,
@@ -224,7 +261,7 @@ def start(booking_id: str, body: StartCodeIn, user: models.User = Depends(get_cu
     b.status = "in_progress"
     b.started_at = datetime.now(timezone.utc)
     b.escrow_released = True
-    provider = get_payment_provider(b.payment_provider)
+    provider = _provider_for(b)
     rel = provider.release_escrow(amount=b.subtotal, booking_id=b.id, expert_id=b.expert_id, commission=b.platform_commission)
     db.add(models.PaymentLedger(
         booking_id=b.id, expert_id=b.expert_id, customer_id=b.customer_id,

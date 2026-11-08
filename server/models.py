@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text, UniqueConstraint, text
 from sqlalchemy import JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -17,6 +17,15 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Statuses that still occupy an expert's clock time. Must match uq_booking_active_slot.
+ACTIVE_BOOKING_STATUSES = ("pending_accept", "confirmed", "on_the_way", "arrived", "in_progress")
+
+
+def active_slot_index_predicate() -> str:
+    quoted = ", ".join(f"'{status}'" for status in ACTIVE_BOOKING_STATUSES)
+    return f"status IN ({quoted})"
+
+
 class User(Base):
     __tablename__ = "users"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: _id("u_"))
@@ -28,6 +37,8 @@ class User(Base):
     city: Mapped[str] = mapped_column(String(80), default="الرياض")
     # Hidden test/QA/demo account (reversible; see server/test_accounts.py). NULL = not yet classified.
     is_test: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False, index=True)
+    # Cached lane flag. Authority is APPLE_REVIEWER_USER_IDS (existing user ids), not this column and not the email.
+    is_apple_reviewer: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
     # Social sign-in subjects (Sign in with Apple / Google). Accounts are linked by verified email.
     apple_sub: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     google_sub: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
@@ -128,9 +139,22 @@ class Booking(Base):
     escrow_released: Mapped[bool] = mapped_column(Boolean, default=False)
     payment_provider: Mapped[str] = mapped_column(String(30), default="mock")
     payment_ref: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # Set at creation when both parties are server-designated reviewers. Forces mock settlement.
+    reviewer_lane: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+Index(
+    "uq_booking_active_slot",
+    Booking.expert_id,
+    Booking.date,
+    Booking.time,
+    unique=True,
+    sqlite_where=text(active_slot_index_predicate()),
+    postgresql_where=text(active_slot_index_predicate()),
+)
 
 
 class PaymentLedger(Base):

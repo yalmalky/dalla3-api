@@ -1,6 +1,7 @@
 from math import cos, radians, sqrt
 
 from . import models
+from .reviewer_lane import is_reviewer_expert
 
 CATEGORIES = [
     {"id": "makeup", "name": "مكياج", "icon": "brush", "tint": "--pink-50"},
@@ -86,7 +87,8 @@ def expert_out(e: models.ExpertProfile, origin=(24.7136, 46.6753)) -> dict:
         "priceFrom": min(prices) if prices else 0,
         "modes": e.modes or ["home"],
         "travelFee": e.travel_fee,
-        "nafathVerified": e.nafath_verified,
+        "nafathVerified": bool(e.nafath_verified),
+        "reviewerLane": is_reviewer_expert(e),
         "sponsored": e.sponsored,
         "nextAvailable": "اليوم",
         "cover": cover_for(e),
@@ -143,6 +145,7 @@ def booking_out(b: models.Booking) -> dict:
         "customerId": b.customer_id,
         "paymentProvider": b.payment_provider,
         "paymentRef": b.payment_ref,
+        "reviewerLane": bool(getattr(b, "reviewer_lane", False)),
     }
 
 

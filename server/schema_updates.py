@@ -11,10 +11,16 @@ from .models import active_slot_index_predicate
 
 
 _ADDITIONS = (
-    ("users", "is_apple_reviewer", "BOOLEAN NOT NULL DEFAULT 0"),
-    ("bookings", "reviewer_lane", "BOOLEAN NOT NULL DEFAULT 0"),
+    ("users", "is_apple_reviewer"),
+    ("bookings", "reviewer_lane"),
 )
 _SLOT_INDEX = "uq_booking_active_slot"
+
+
+def _boolean_column(engine: Engine) -> str:
+    # Postgres rejects DEFAULT 0 for boolean. SQLite accepts 0; both mean false.
+    literal = "FALSE" if engine.dialect.name == "postgresql" else "0"
+    return f"BOOLEAN NOT NULL DEFAULT {literal}"
 
 
 def _columns(engine: Engine, table: str) -> set[str]:
@@ -26,9 +32,14 @@ def _index_names(engine: Engine, table: str) -> set[str]:
 
 
 def upgrade_reviewer_schema(engine: Engine) -> list[str]:
-    """Add reviewer columns and the active-slot index when missing. Safe to run on every boot."""
+    """Add reviewer columns and the active-slot index when missing.
+
+    Does not update or delete existing rows. Raises if duplicate active slots
+    already exist, leaving those bookings unchanged.
+    """
     added: list[str] = []
-    for table, column, decl in _ADDITIONS:
+    decl = _boolean_column(engine)
+    for table, column in _ADDITIONS:
         if column in _columns(engine, table):
             continue
         with engine.begin() as conn:
@@ -51,7 +62,7 @@ def downgrade_reviewer_schema(engine: Engine) -> list[str]:
         with engine.begin() as conn:
             conn.exec_driver_sql(f"DROP INDEX IF EXISTS {_SLOT_INDEX}")
         removed.append(f"bookings.{_SLOT_INDEX}")
-    for table, column, _decl in reversed(_ADDITIONS):
+    for table, column in reversed(_ADDITIONS):
         if column not in _columns(engine, table):
             continue
         with engine.begin() as conn:

@@ -140,14 +140,24 @@ The iOS app should show the reviewer flow only when `reviewerLane` is true, incl
 On startup the API runs `upgrade_reviewer_schema` (`server/schema_updates.py`). It adds missing columns and the slot index. It does not grant the lane to existing rows:
 
 ```sql
-ALTER TABLE users ADD COLUMN is_apple_reviewer BOOLEAN NOT NULL DEFAULT 0;
-ALTER TABLE bookings ADD COLUMN reviewer_lane BOOLEAN NOT NULL DEFAULT 0;
+-- Postgres
+ALTER TABLE users ADD COLUMN is_apple_reviewer BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE bookings ADD COLUMN reviewer_lane BOOLEAN NOT NULL DEFAULT FALSE;
+-- SQLite uses DEFAULT 0 for the same boolean columns.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_booking_active_slot
   ON bookings (expert_id, date, time)
   WHERE status IN ('pending_accept', 'confirmed', 'on_the_way', 'arrived', 'in_progress');
 ```
 
-`DEFAULT 0` is accepted for boolean columns on Postgres and SQLite. New databases get the same objects from the SQLAlchemy models. Existing databases get them from startup, and each statement is skipped when the object is already there.
+Postgres rejects `DEFAULT 0` on a boolean column, so startup uses `FALSE` there and `0` on SQLite. New databases get the columns from the SQLAlchemy models. Existing databases get them from startup, and each statement is skipped when the object is already there. Adding the columns does not update existing profile or booking rows. If two active bookings already share an expert, date, and time, creating the unique index stops with an error and does not delete or cancel those rows. Check that before deploying:
+
+```sql
+SELECT expert_id, date, time, count(*)
+FROM bookings
+WHERE status IN ('pending_accept', 'confirmed', 'on_the_way', 'arrived', 'in_progress')
+GROUP BY expert_id, date, time
+HAVING count(*) > 1;
+```
 
 Equivalent Postgres, if you apply DDL yourself before boot:
 

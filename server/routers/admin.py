@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from .. import models
 from ..db import get_db
+from ..reviewer_lane import is_designated_email
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -36,7 +37,17 @@ def list_accounts(db: Session = Depends(get_db)):
     users = db.query(models.User).order_by(models.User.created_at).all()
     return {
         "experts": [_expert_row(e) for e in experts],
-        "users": [{"id": u.id, "email": u.email, "name": u.name, "role": u.role, "hidden": bool(u.is_test)} for u in users],
+        "users": [
+            {
+                "id": u.id,
+                "email": u.email,
+                "name": u.name,
+                "role": u.role,
+                "hidden": bool(u.is_test),
+                "reviewerLane": is_designated_email(u.email),
+            }
+            for u in users
+        ],
         "hiddenExperts": sum(1 for e in experts if e.is_test),
         "hiddenUsers": sum(1 for u in users if u.is_test),
     }

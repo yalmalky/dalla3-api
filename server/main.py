@@ -9,6 +9,7 @@ from .db import Base, engine
 from .routers import admin, auth_routes, bookings, catalog, expert_me, me, media
 from .test_accounts import classify_existing
 from .seed import ensure_promos
+from .schema_updates import upgrade_reviewer_schema
 from .db import SessionLocal
 
 
@@ -47,6 +48,8 @@ async def lifespan(_: FastAPI):
         if col not in ucols:
             with engine.begin() as conn:
                 conn.exec_driver_sql(f"ALTER TABLE users ADD COLUMN {col} VARCHAR(255)")
+    # Reviewer lane columns. No domain backfill — designation stays in APPLE_REVIEWER_EMAILS.
+    upgrade_reviewer_schema(engine)
     db = SessionLocal()
     try:
         ensure_promos(db)

@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session, joinedload
 from .. import models
 from ..auth import get_current_user
 from ..db import get_db
+from ..reviewer_lane import apply_expert_onboarding
 from ..schemas import ExpertProfileIn, ServiceIn
 from ..serializers import expert_out, service_out
 
@@ -16,6 +17,7 @@ def my_expert(user: models.User = Depends(get_current_user), db: Session = Depen
     if not e:
         return None
     data = expert_out(e)
+    data["status"] = e.status
     data["services"] = [service_out(s) for s in e.services]
     return data
 
@@ -42,11 +44,7 @@ def upsert_expert(body: ExpertProfileIn, user: models.User = Depends(get_current
     e.hours = body.hours
     e.cover = body.cover
     e.tint = body.tint
-    e.iban = body.iban
-    e.bank_name = body.bank_name
-    e.freelance_number = body.freelance_number
-    e.nafath_verified = body.nafath_verified  # mock Nafath
-    e.status = "approved"
+    apply_expert_onboarding(user, e, body)
     if body.services:
         # replace services
         for s in list(e.services):
@@ -63,8 +61,14 @@ def upsert_expert(body: ExpertProfileIn, user: models.User = Depends(get_current
             ))
     db.commit()
     db.refresh(e)
-    e = db.query(models.ExpertProfile).options(joinedload(models.ExpertProfile.services)).filter_by(id=e.id).one()
+    e = (
+        db.query(models.ExpertProfile)
+        .options(joinedload(models.ExpertProfile.services), joinedload(models.ExpertProfile.user))
+        .filter_by(id=e.id)
+        .one()
+    )
     data = expert_out(e)
+    data["status"] = e.status
     data["services"] = [service_out(s) for s in e.services]
     return data
 

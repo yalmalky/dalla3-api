@@ -1,10 +1,12 @@
 """Test / QA / demo accounts: hidden (never deleted) via the reversible `is_test` flag.
 
-- Hidden experts are excluded from listings, search, expert pages, quotes, bookings, favorites and promos.
-- Hidden customers keep their data; they are just flagged so they can be excluded from stats/exports.
-- The rules below run ONCE per row (only where is_test IS NULL, i.e. rows that existed before the flag).
-  New sign-ups get is_test = false. After that, flags change only via the admin endpoints
-  (`/api/admin/test-accounts`, header X-Admin-Token = env ADMIN_TOKEN) or SQL:
+- Hidden experts are excluded from public listings, search, expert pages, quotes, bookings, favorites and promos.
+- `is_test` does not grant access. A test-domain signup cannot read hidden experts or the Apple reviewer lane.
+- Hidden customers keep their data; they are flagged so they can be excluded from stats/exports.
+- `classify_existing` runs ONCE per row (only where is_test IS NULL).
+- Public sign-up sets is_test from the email heuristic (see auth routes). That flag is not reviewer designation.
+  Reviewer access is only the exact-email allowlist in APPLE_REVIEWER_EMAILS.
+- After classification, hide/unhide is via `/api/admin/test-accounts` (header X-Admin-Token = env ADMIN_TOKEN) or SQL:
       UPDATE expert_profiles SET is_test = false WHERE id = 'e_…';
       UPDATE users SET is_test = false WHERE email = '…';
 """
@@ -51,7 +53,11 @@ def classify_existing(db: Session) -> dict:
 
 
 def visible_expert():
-    """SQLAlchemy filter: expert is not a hidden test account."""
+    """SQLAlchemy filter: row is not marked is_test.
+
+    This is not the catalog rule. Public discovery also hides reviewer-lane
+    experts, and reviewers do not see real experts. Use can_discover_expert.
+    """
     return or_(models.ExpertProfile.is_test.is_(None), models.ExpertProfile.is_test.is_(False))
 
 

@@ -28,6 +28,8 @@ class User(Base):
     city: Mapped[str] = mapped_column(String(80), default="الرياض")
     # Hidden test/QA/demo account (reversible; see server/test_accounts.py). NULL = not yet classified.
     is_test: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False, index=True)
+    # Apple reviewer lane. Authoritative source is APPLE_REVIEWER_EMAILS, not this column and not the email domain.
+    is_apple_reviewer: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
     # Social sign-in subjects (Sign in with Apple / Google). Accounts are linked by verified email.
     apple_sub: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     google_sub: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
@@ -128,6 +130,8 @@ class Booking(Base):
     escrow_released: Mapped[bool] = mapped_column(Boolean, default=False)
     payment_provider: Mapped[str] = mapped_column(String(30), default="mock")
     payment_ref: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # Set at creation when both parties are server-designated reviewers. Forces mock settlement.
+    reviewer_lane: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

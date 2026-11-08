@@ -5,6 +5,7 @@ from .. import models
 from ..auth import create_token, get_current_user, hash_password, verify_password
 from ..db import get_db
 from ..test_accounts import is_test_email
+from ..reviewer_lane import is_designated_email, sync_reviewer_designation
 import secrets
 
 from ..config import get_settings
@@ -23,6 +24,8 @@ def _user_dict(u: models.User) -> dict:
         "role": u.role,
         "city": u.city,
         "expertId": u.expert_profile.id if u.expert_profile else None,
+        # Server allowlist only. Clients must not infer this from the email domain.
+        "reviewerLane": is_designated_email(u.email),
     }
 
 
@@ -40,10 +43,12 @@ def register(body: RegisterIn, db: Session = Depends(get_db)):
         role=body.role,
         city=body.city,
         is_test=is_test_email(body.email),  # QA sign-ups (e.g. @dalla3.test) stay hidden
+        is_apple_reviewer=False,  # domain and client input cannot self-grant; sync applies the allowlist
     )
     db.add(user)
     db.commit()
     db.refresh(user)
+    sync_reviewer_designation(db, user)
     return TokenOut(access_token=create_token(user.id, user.role), user=_user_dict(user))
 
 
@@ -52,6 +57,7 @@ def login(body: LoginIn, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.email == body.email.lower()).first()
     if not user or not verify_password(body.password, user.password_hash):
         raise HTTPException(401, "الإيميل أو كلمة المرور غلط")
+    sync_reviewer_designation(db, user)
     return TokenOut(access_token=create_token(user.id, user.role), user=_user_dict(user))
 
 
@@ -73,6 +79,7 @@ def _social_login(db: Session, provider: str, claims: dict, name: str) -> TokenO
             name=(name or claims.get("name") or email.split("@")[0])[:120],
             role="customer",  # role is chosen later (customer by default; «انضمي كخبيرة» upgrades)
             is_test=is_test_email(email),
+            is_apple_reviewer=False,
         )
         db.add(user)
         is_new = True
@@ -84,6 +91,7 @@ def _social_login(db: Session, provider: str, claims: dict, name: str) -> TokenO
         user.name = name[:120]
     db.commit()
     db.refresh(user)
+    sync_reviewer_designation(db, user)
     out = _user_dict(user)
     out["isNew"] = is_new
     return TokenOut(access_token=create_token(user.id, user.role), user=out)
